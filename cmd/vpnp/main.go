@@ -41,24 +41,41 @@ func main() {
 		usage()
 		os.Exit(2)
 	}
+	cmd, args := os.Args[1], os.Args[2:]
+	// `vpnp <cmd> -h|--help` prints the command's detailed help.
+	if len(args) > 0 && (args[0] == "-h" || args[0] == "--help") {
+		if h, ok := commandHelp[cmd]; ok {
+			fmt.Print(h)
+			return
+		}
+	}
 	var err error
-	switch os.Args[1] {
+	switch cmd {
 	case "up":
-		err = cmdUp(os.Args[2:])
+		err = cmdUp(args)
 	case "down":
 		err = cmdDown()
 	case "status":
 		err = cmdStatus()
 	case "dns":
-		err = cmdDNS()
+		err = cmdDNS(args)
 	case "access":
-		err = cmdAccess()
+		err = cmdAccess(args)
 	case "logs":
 		err = cmdLogs()
 	case "help", "-h", "--help":
+		if len(args) > 0 {
+			if h, ok := commandHelp[args[0]]; ok {
+				fmt.Print(h)
+				return
+			}
+			fmt.Fprintf(os.Stderr, "no detailed help for %q\n\n", args[0])
+			usage()
+			os.Exit(2)
+		}
 		usage()
 	default:
-		fmt.Fprintf(os.Stderr, "unknown command: %s\n\n", os.Args[1])
+		fmt.Fprintf(os.Stderr, "unknown command: %s\n\n", cmd)
 		usage()
 		os.Exit(2)
 	}
@@ -69,19 +86,150 @@ func main() {
 }
 
 func usage() {
-	fmt.Print(`vpnp — AWS Client VPN (split-tunnel) in one command
+	fmt.Print(`vpnp — AWS Client VPN (split-tunnel) client for macOS
 
-  vpnp up [-ovpn path]   connect the VPN (asks for your sudo password)
-  vpnp down              disconnect and remove the split-DNS entries
-  vpnp status            tunnel / routes / split-DNS health
-  vpnp dns               edit which DNS suffixes resolve through the VPN
-  vpnp access            edit what containers may reach through the VPN
-  vpnp logs              follow the openvpn log
+USAGE
+  vpnp <command> [flags]
+  vpnp help <command>     detailed help: behavior, files touched, exit codes
 
-While up, the OS routes the VPN's pushed ranges through the tunnel and
-everything else directly — every tool just works, no proxy config.
-Reconnects are automatic and silent (certificate auth — no browser).
+COMMANDS
+  up [-ovpn <path>]  connect: pin the endpoint IP, start openvpn as root,
+                     apply split-DNS (/etc/resolver) and the container policy
+  down               disconnect and undo everything 'up' applied; idempotent
+  status             health report, one line per subsystem; read-only, no sudo
+  dns [-apply]       edit config/vpn.dns ($EDITOR); -apply skips the editor
+                     and just validates + re-applies the file
+  access [-apply]    edit config/vpn.access ($EDITOR); -apply skips the editor
+                     and just validates + re-applies the file
+  logs               follow the openvpn log (blocks until interrupted)
+  help [command]     this overview, or detailed per-command help
+
+HOW IT WORKS
+  Split-tunnel: the OS routes only the VPN's pushed ranges (e.g. 10.0.0.0/16)
+  through the tunnel, so every tool reaches VPN-private IPs with no proxy and
+  no per-tool config. DNS: only the suffixes in config/vpn.dns resolve through
+  the VPN. apple/container guests are DEFAULT-DENY into the tunnel; rules in
+  config/vpn.access grant destinations. Host networking (ip.forwarding,
+  default route, global DNS) is never modified. Reconnects after drops are
+  automatic and silent (certificate auth — no browser, no prompts).
+
+FILES (relative to the repo root; discovered from the binary or by walking up)
+  config/vpn.ovpn      AWS Client VPN profile, mutual-certificate auth
+  config/vpn.dns       split-DNS suffixes            format: vpnp help dns
+  config/vpn.access    container->VPN allowlist      format: vpnp help access
+  .env                 optional: VPN_TEST_URL, CONTAINER_NAT_SUBNET
+  .run/ovpn.log        openvpn log (what 'vpnp logs' follows)
+
+AUTOMATION / NON-INTERACTIVE USE
+  - 'up', 'down', and '-apply' run sudo: expect a password prompt on the TTY
+    unless sudo credentials are cached or NOPASSWD is configured.
+  - 'dns'/'access' WITHOUT -apply open $EDITOR (interactive). Non-interactive
+    callers should write the config file directly, then run 'vpnp dns -apply'
+    or 'vpnp access -apply'.
+  - Exit codes: 0 success; 1 failure ("ERROR: ..." on stderr); 2 usage error.
+    'status' exits 0 only when the VPN is connected — use it as a probe.
 `)
+}
+
+// commandHelp is the detailed per-command help, shown by
+// `vpnp help <command>` and `vpnp <command> -h`.
+var commandHelp = map[string]string{
+	"up": `vpnp up [-ovpn <path>]
+
+Connect the VPN. Steps, in order:
+  1. Parse the .ovpn profile (default config/vpn.ovpn), strip its
+     remote/remote-random-hostname lines, resolve the endpoint once with a
+     random-prefixed DNS label and pin that IP for the whole session.
+  2. Start openvpn as a root daemon (sudo) with log/pidfile under .run/.
+     openvpn owns reconnects from here; certificate auth means no prompts.
+  3. Wait up to 60s for the tunnel, then read the pushed routes and DNS
+     server from the log.
+  4. Write /etc/resolver/<suffix> for each suffix in config/vpn.dns
+     (created from its .example on first run) and flush the DNS caches.
+  5. Load the container policy (source-NAT + default-deny allowlist from
+     config/vpn.access) into the pf anchor com.apple/vpnp.
+
+Flags:
+  -ovpn <path>   profile to use (default config/vpn.ovpn); switching
+                 endpoints = vpnp down && vpnp up -ovpn <other.ovpn>
+
+Requires sudo (interactive password prompt unless cached/NOPASSWD).
+Exit: 0 connected and configured; 1 any step failed (partial state is
+possible — run 'vpnp down' to clean up, 'vpnp logs' to diagnose).
+Errors if already up ("openvpn already running").
+`,
+	"down": `vpnp down
+
+Disconnect and clean up, in order: remove the /etc/resolver entries written
+by up, flush the pf anchor and release the pf enable reference, SIGTERM
+openvpn (which removes its routes and the utun device).
+
+Idempotent: safe to run when nothing is up (prints "vpnp was not up.") and
+after a crash — it removes whatever leftovers exist.
+
+Requires sudo when there is anything to clean up.
+Exit: 0 cleaned up (or nothing to do); 1 a cleanup step failed.
+`,
+	"status": `vpnp status
+
+Read-only health report; no sudo. Lines, in order (some only when relevant):
+  vpn:         openvpn running (pid N) | NOT RUNNING
+  routes:      <pushed CIDR> via <utunX> | NOT INSTALLED
+  split-dns:   applied /etc/resolver suffixes | none applied
+  containers:  NAT <subnet> via <utunX> to <routes> — allow <rules> | no NAT
+  forwarding:  current net.inet.ip.forwarding value (vpnp never changes it)
+  vpn-test:    reachable | UNREACHABLE — plain curl of VPN_TEST_URL from .env
+
+Exit: 0 the VPN is up; 1 it is not (or a check could not run).
+Use as a machine probe: vpnp status >/dev/null && echo connected
+`,
+	"dns": `vpnp dns [-apply]
+
+Maintain config/vpn.dns — which DNS suffixes resolve through the VPN.
+Without flags: opens the file in $VISUAL/$EDITOR (interactive), then
+validates and, if the VPN is up, re-applies /etc/resolver immediately.
+With -apply: skips the editor — validates the file as-is and re-applies.
+Non-interactive callers should edit the file directly, then run -apply.
+
+File format (one directive per line, # comments):
+  <suffix>            e.g. execute-api.ap-northeast-1.amazonaws.com
+                      covers every subdomain; resolved via the VPN's DNS
+  nameserver=<ip>     optional override when the endpoint pushes no DNS
+
+Requires sudo only when re-applying (VPN up).
+Exit: 0 saved/applied; 1 invalid file or apply failure.
+`,
+	"access": `vpnp access [-apply]
+
+Maintain config/vpn.access — what apple/container guests may reach THROUGH
+the VPN. Containers are DEFAULT-DENY into the tunnel; only matching allow
+rules pass. Host traffic and container internet are never filtered.
+Without flags: opens the file in $VISUAL/$EDITOR (interactive), then
+validates and, if the VPN is up, re-applies the pf rules immediately.
+With -apply: skips the editor — validates the file as-is and re-applies.
+Non-interactive callers should edit the file directly, then run -apply.
+
+File format (one rule per line, # comments):
+  allow <CIDR|IP|any> [port <n>] [proto tcp|udp]
+    any        = everything the VPN routes
+    port       implies proto tcp unless proto is given
+    no port    = all ports and protocols to that destination
+Examples:
+  allow 10.0.0.0/16 port 443
+  allow 10.0.12.34 port 5432
+  allow any
+
+Requires sudo only when re-applying (VPN up).
+Exit: 0 saved/applied; 1 invalid file or apply failure.
+`,
+	"logs": `vpnp logs
+
+Follow the openvpn log (tail -f .run/ovpn.log). Blocks until interrupted —
+non-interactive callers should read .run/ovpn.log directly instead.
+Useful markers: "Initialization Sequence Completed" (connected),
+"AUTH_FAILED", "TLS Error", "SIGTERM" (shutdown).
+Exit: 0 on interrupt; 1 if no log exists yet.
+`,
 }
 
 // ---------------------------------------------------------------- commands
@@ -89,6 +237,7 @@ Reconnects are automatic and silent (certificate auth — no browser).
 func cmdUp(args []string) error {
 	fs := flag.NewFlagSet("up", flag.ExitOnError)
 	ovpn := fs.String("ovpn", "config/vpn.ovpn", "path to AWS Client VPN config")
+	fs.Usage = func() { fmt.Fprint(os.Stderr, commandHelp["up"]) }
 	fs.Parse(args)
 
 	root, err := findRepo()
@@ -293,7 +442,12 @@ func applyContainerPolicy(root string, routes []string) {
 	}
 }
 
-func cmdAccess() error {
+func cmdAccess(args []string) error {
+	fs := flag.NewFlagSet("access", flag.ExitOnError)
+	apply := fs.Bool("apply", false, "skip the editor; validate config/vpn.access as-is and re-apply")
+	fs.Usage = func() { fmt.Fprint(os.Stderr, commandHelp["access"]) }
+	fs.Parse(args)
+
 	root, err := findRepo()
 	if err != nil {
 		return err
@@ -301,15 +455,10 @@ func cmdAccess() error {
 	if err := ensureAccessFile(root); err != nil {
 		return err
 	}
-	editor := os.Getenv("VISUAL")
-	if editor == "" {
-		editor = os.Getenv("EDITOR")
-	}
-	if editor == "" {
-		editor = "vi"
-	}
-	if err := passthrough(editor, pfnat.AccessPath(root)); err != nil {
-		return err
+	if !*apply {
+		if err := passthrough(editorCmd(), pfnat.AccessPath(root)); err != nil {
+			return err
+		}
 	}
 	if _, err := pfnat.ParseAccess(root); err != nil {
 		return err
@@ -323,7 +472,12 @@ func cmdAccess() error {
 	return nil
 }
 
-func cmdDNS() error {
+func cmdDNS(args []string) error {
+	fs := flag.NewFlagSet("dns", flag.ExitOnError)
+	apply := fs.Bool("apply", false, "skip the editor; validate config/vpn.dns as-is and re-apply")
+	fs.Usage = func() { fmt.Fprint(os.Stderr, commandHelp["dns"]) }
+	fs.Parse(args)
+
 	root, err := findRepo()
 	if err != nil {
 		return err
@@ -331,15 +485,10 @@ func cmdDNS() error {
 	if err := ensureDNSFile(root); err != nil {
 		return err
 	}
-	editor := os.Getenv("VISUAL")
-	if editor == "" {
-		editor = os.Getenv("EDITOR")
-	}
-	if editor == "" {
-		editor = "vi"
-	}
-	if err := passthrough(editor, macdns.ConfigPath(root)); err != nil {
-		return err
+	if !*apply {
+		if err := passthrough(editorCmd(), macdns.ConfigPath(root)); err != nil {
+			return err
+		}
 	}
 	cfg, err := macdns.ParseConfig(root)
 	if err != nil {
@@ -470,6 +619,16 @@ func dotEnv(root string) map[string]string {
 		}
 	}
 	return m
+}
+
+func editorCmd() string {
+	if e := os.Getenv("VISUAL"); e != "" {
+		return e
+	}
+	if e := os.Getenv("EDITOR"); e != "" {
+		return e
+	}
+	return "vi"
 }
 
 func passthrough(name string, args ...string) error {

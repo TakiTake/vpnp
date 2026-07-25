@@ -57,6 +57,13 @@ vpnp status    # tunnel / routes / split-DNS / forwarding-invariant health
 vpnp down      # disconnect and remove the /etc/resolver entries
 ```
 
+Every command documents itself in detail — behavior, files touched, file
+formats, and exit codes: `vpnp help <command>`. Non-interactive callers
+(scripts, AI agents) can edit `config/vpn.dns` / `config/vpn.access`
+directly and run `vpnp dns -apply` / `vpnp access -apply` — no `$EDITOR`
+involved; `vpnp status` exits 0 only when connected, so it doubles as a
+probe.
+
 That's it. While up, VPN-private IPs and the DNS suffixes in
 `config/vpn.dns` work in **every** tool — curl, ssh, browsers, IDEs —
 with zero configuration:
