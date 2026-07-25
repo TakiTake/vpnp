@@ -30,12 +30,26 @@ openvpn is missing for AWS Client VPN:
 
 ## Prerequisites
 
-- macOS, [Homebrew](https://brew.sh) OpenVPN ≥ 2.7: `brew install openvpn`
-- Go (to build the CLI): `brew install go`
+- macOS (Apple Silicon), [Homebrew](https://brew.sh) OpenVPN ≥ 2.7
+  (installed automatically by the brew formula, or `brew install openvpn`)
 - Your AWS Client VPN `.ovpn` with **mutual certificate auth** (inline
   `<cert>`/`<key>`, no SAML browser sign-in) — see [config/README.md](config/README.md)
 
-## Setup (once)
+## Install with Homebrew
+
+```sh
+brew install TakiTake/tap/vpnp
+cp ~/Downloads/downloaded-client-config.ovpn /opt/homebrew/etc/vpnp/config/vpn.ovpn
+```
+
+A brew-installed vpnp keeps its config and runtime state under
+`/opt/homebrew/etc/vpnp/` (`config/vpn.ovpn`, `config/vpn.dns`,
+`config/vpn.access`, optional `.env`, logs in `.run/`). Everything else
+below is identical.
+
+## Install from source (alternative)
+
+Needs Go (`brew install go`). Config then lives in the clone.
 
 ```sh
 git clone https://github.com/TakiTake/vpnp.git && cd vpnp
