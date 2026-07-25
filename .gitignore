@@ -1,0 +1,20 @@
+# VPN configs contain certificates/keys — never commit
+config/*.ovpn
+
+# local environment overrides
+.env
+
+# per-user VPN DNS suffixes (contain internal hostnames)
+config/vpn.dns
+
+# vpnp runtime state (pidfile, daemon log)
+.run/
+
+# built binary if compiled into the repo, and Go build/test artifacts
+/vpnp
+*.test
+*.out
+
+# local tooling state and obsolete build artifacts from earlier incarnations
+.claude/
+kernel/

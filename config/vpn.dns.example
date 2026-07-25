@@ -1,0 +1,20 @@
+# Split-DNS suffixes for vpnp.
+#
+# For each suffix listed here, `vpnp up` writes /etc/resolver/<suffix>
+# pointing at the VPN's DNS server (the one the endpoint pushes, or the
+# nameserver= override below). ONLY these names are then resolved through
+# the tunnel; all other DNS stays on your normal resolvers. `vpnp down`
+# removes the files again.
+#
+# One suffix per line; a suffix covers every subdomain. Edit with:
+#   vpnp dns          (re-applies immediately if the VPN is up)
+#
+# Optional override if the endpoint pushes no DNS server:
+#   nameserver=10.0.0.2
+
+# Private API Gateway endpoints (resolve to 10.x through the VPC resolver);
+# adjust the region to yours:
+execute-api.ap-northeast-1.amazonaws.com
+
+# Internal domains:
+#internal.example.corp
