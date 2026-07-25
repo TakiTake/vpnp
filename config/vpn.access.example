@@ -1,0 +1,21 @@
+# What apple/container guests may reach THROUGH THE VPN.
+#
+# Containers are DEFAULT-DENY into the tunnel: only destinations matching
+# an allow rule pass; everything else the VPN routes is blocked for them.
+# Host traffic is never affected. Container internet traffic is never
+# affected (only VPN-routed ranges are filtered).
+#
+# Edit with: vpnp access   (re-applies immediately if the VPN is up)
+#
+#   allow <CIDR|IP|any> [port <n>] [proto tcp|udp]
+#
+# 'any' means everything the VPN routes. A port implies proto tcp unless
+# proto is given.
+
+# HTTPS anywhere in the VPC (adjust to your VPC range):
+allow 10.0.0.0/16 port 443
+
+# Examples:
+#allow 10.0.12.34 port 5432          # one database
+#allow 10.0.20.0/24                  # a whole subnet, all ports
+#allow any                           # ungoverned (the pre-allowlist behavior)

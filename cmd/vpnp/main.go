@@ -51,6 +51,8 @@ func main() {
 		err = cmdStatus()
 	case "dns":
 		err = cmdDNS()
+	case "access":
+		err = cmdAccess()
 	case "logs":
 		err = cmdLogs()
 	case "help", "-h", "--help":
@@ -73,6 +75,7 @@ func usage() {
   vpnp down              disconnect and remove the split-DNS entries
   vpnp status            tunnel / routes / split-DNS health
   vpnp dns               edit which DNS suffixes resolve through the VPN
+  vpnp access            edit what containers may reach through the VPN
   vpnp logs              follow the openvpn log
 
 While up, the OS routes the VPN's pushed ranges through the tunnel and
@@ -149,22 +152,7 @@ func cmdUp(args []string) error {
 		step(fmt.Sprintf("split-DNS → %s for: %s", ns, strings.Join(dnsCfg.Suffixes, ", ")))
 	}
 
-	// Let apple/container guests reach the VPN too: their packets are
-	// forwarded into the tunnel with the container source IP, which the
-	// VPN drops — source-NAT them to the tunnel address.
-	subnet := dotEnv(root)["CONTAINER_NAT_SUBNET"]
-	if subnet == "" {
-		subnet = pfnat.DefaultSubnet
-	}
-	if subnet != "off" && len(routes) > 0 {
-		if iface := routeIface(routes[0]); iface == "" {
-			fmt.Println("! tunnel route not found — skipping container NAT (containers won't reach the VPN)")
-		} else if err := pfnat.Apply(root, iface, subnet, routes); err != nil {
-			fmt.Printf("! container NAT failed (%v) — containers won't reach the VPN; the host is unaffected\n", err)
-		} else {
-			step(fmt.Sprintf("container NAT — %s reaches the VPN via %s", subnet, iface))
-		}
-	}
+	applyContainerPolicy(root, routes)
 
 	fmt.Print(`
 Ready. VPN-private IPs and the domains in config/vpn.dns now work in
@@ -243,7 +231,7 @@ func cmdStatus() error {
 	}
 
 	if info := pfnat.Info(root); info != "" {
-		fmt.Printf("containers: NAT %s\n", info)
+		fmt.Printf("containers: NAT %s (edit with: vpnp access)\n", info)
 	} else {
 		fmt.Println("containers: no NAT — apple/container guests can't reach the VPN")
 	}
@@ -261,6 +249,77 @@ func cmdStatus() error {
 			fmt.Printf("vpn-test:   UNREACHABLE (%s) — check: vpnp logs\n", testURL)
 		}
 	}
+	return nil
+}
+
+// applyContainerPolicy installs (or reloads) the container→VPN NAT and
+// allowlist. Failures are warnings, not errors: the host-side VPN works
+// regardless.
+func applyContainerPolicy(root string, routes []string) {
+	subnet := dotEnv(root)["CONTAINER_NAT_SUBNET"]
+	if subnet == "" {
+		subnet = pfnat.DefaultSubnet
+	}
+	if subnet == "off" || len(routes) == 0 {
+		return
+	}
+	iface := routeIface(routes[0])
+	if iface == "" {
+		fmt.Println("! tunnel route not found — skipping container NAT (containers won't reach the VPN)")
+		return
+	}
+	if err := ensureAccessFile(root); err != nil {
+		fmt.Printf("! %v\n", err)
+		return
+	}
+	allows, err := pfnat.ParseAccess(root)
+	if err != nil {
+		fmt.Printf("! container policy NOT applied (%v) — containers won't reach the VPN; fix with: vpnp access\n", err)
+		return
+	}
+	if err := pfnat.Apply(root, iface, subnet, routes, allows); err != nil {
+		fmt.Printf("! container NAT failed (%v) — containers won't reach the VPN; the host is unaffected\n", err)
+		return
+	}
+	switch len(allows) {
+	case 0:
+		fmt.Printf("! containers BLOCKED from the VPN — no allow rules in config/vpn.access (edit: vpnp access)\n")
+	default:
+		var parts []string
+		for _, a := range allows {
+			parts = append(parts, a.String())
+		}
+		step(fmt.Sprintf("container access via %s — allow %s only (default-deny)", iface, strings.Join(parts, ", ")))
+	}
+}
+
+func cmdAccess() error {
+	root, err := findRepo()
+	if err != nil {
+		return err
+	}
+	if err := ensureAccessFile(root); err != nil {
+		return err
+	}
+	editor := os.Getenv("VISUAL")
+	if editor == "" {
+		editor = os.Getenv("EDITOR")
+	}
+	if editor == "" {
+		editor = "vi"
+	}
+	if err := passthrough(editor, pfnat.AccessPath(root)); err != nil {
+		return err
+	}
+	if _, err := pfnat.ParseAccess(root); err != nil {
+		return err
+	}
+	if _, running := ovpnrun.Pid(root); !running {
+		fmt.Println("saved — applies on next: vpnp up")
+		return nil
+	}
+	fmt.Println("  (re-applying pf rules — sudo may ask for your password)")
+	applyContainerPolicy(root, ovpnrun.PushedRoutes(root))
 	return nil
 }
 
@@ -337,6 +396,23 @@ func ensureDNSFile(root string) error {
 	}
 	fmt.Println("! created config/vpn.dns from the example — put your real VPN DNS")
 	fmt.Println("  suffixes in it:  vpnp dns")
+	return nil
+}
+
+func ensureAccessFile(root string) error {
+	path := pfnat.AccessPath(root)
+	if _, err := os.Stat(path); err == nil {
+		return nil
+	}
+	data, err := os.ReadFile(path + ".example")
+	if err != nil {
+		return fmt.Errorf("missing %s and its .example: %w", path, err)
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		return err
+	}
+	fmt.Println("! created config/vpn.access from the example — containers may reach")
+	fmt.Println("  HTTPS in the VPC only; adjust with:  vpnp access")
 	return nil
 }
 

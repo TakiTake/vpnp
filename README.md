@@ -80,6 +80,28 @@ pointing at the VPN's pushed DNS server (VPC resolver), so VPN-private
 names resolve to their private IPs. All other DNS never touches the VPN.
 Routing needs no list at all — the endpoint's pushed routes cover it.
 
+### Container governance: what containers may reach through the VPN
+
+The AWS VPN Client app "solves" the Mac-as-router risk by disabling IP
+forwarding entirely, breaking apple/container. vpnp keeps forwarding on
+and moves the enforcement into pf instead: containers are **default-deny**
+into the tunnel, and `config/vpn.access` opts in specific destinations:
+
+```sh
+vpnp access    # edit — re-applies immediately if the VPN is up
+```
+
+```
+allow 10.0.0.0/16 port 443     # HTTPS anywhere in the VPC
+allow 10.0.12.34 port 5432     # one database
+allow any                      # ungoverned, explicit opt-in
+```
+
+The filter matches container-sourced traffic before NAT, so host traffic
+is never affected, and only VPN-routed ranges are filtered — container
+internet access is untouched. Other LAN devices can't ride the tunnel at
+all (their sources are never NAT'd, so the VPN drops them).
+
 ### Switching endpoints
 
 ```sh
@@ -114,13 +136,16 @@ unnecessary complexity.
 4. Writes `/etc/resolver/<suffix>` (nameserver = pushed VPN DNS) for each
    suffix in `config/vpn.dns` and flushes the DNS caches. The file list is
    tracked in `.run/resolver.list`.
-5. Loads a source-NAT rule into the pf anchor `com.apple/vpnp` (evaluated
-   by macOS's stock pf.conf — no system config touched) so **apple/container
-   guests reach the VPN too**: their forwarded packets would otherwise
-   enter the tunnel with the container's `192.168.64.x` source address,
-   which AWS drops. Override the subnet with `CONTAINER_NAT_SUBNET` in
-   `.env` (`off` disables it).
-6. `vpnp down` removes the resolver files and the NAT rule, then SIGTERMs
+5. Loads the container policy into the pf anchor `com.apple/vpnp`
+   (evaluated by macOS's stock pf.conf — no system config touched) so
+   **apple/container guests reach the VPN too, governed**: a source-NAT
+   rule (their forwarded packets would otherwise enter the tunnel with the
+   container's `192.168.64.x` source address, which AWS drops) plus a
+   **default-deny allowlist** — containers only reach the destinations and
+   ports listed in `config/vpn.access`. Host traffic and container
+   internet traffic are never filtered. Override the subnet with
+   `CONTAINER_NAT_SUBNET` in `.env` (`off` disables NAT and filtering).
+6. `vpnp down` removes the resolver files and the pf rules, then SIGTERMs
    openvpn, which tears down its routes and the utun.
 
 ## Troubleshooting
@@ -132,7 +157,7 @@ unnecessary complexity.
 | A private hostname doesn't resolve | Its suffix isn't in `config/vpn.dns` — add it: `vpnp dns` |
 | A private IP doesn't connect | Is it inside the pushed routes? `vpnp status` shows them; ranges outside what the endpoint pushes need an AWS-side route |
 | apple/container has no internet | Unrelated to vpnp (validated) — check `sysctl net.inet.ip.forwarding` is 1; macOS resets it to 0 on reboot and Amazon's client sets it to 0 |
-| Containers resolve VPN names but connections time out | The NAT rule is missing or went stale (utun number changed after a reconnect) — `vpnp status` shows the `containers:` line; `vpnp down && vpnp up` refreshes it |
+| Containers resolve VPN names but connections time out | Either the destination/port isn't allowed in `config/vpn.access` (`vpnp access`), or the pf rules went stale (utun number changed after a reconnect) — `vpnp status` shows the `containers:` line; `vpnp down && vpnp up` refreshes |
 | Stale `/etc/resolver` entries after a crash | `vpnp down` removes them any time, even with openvpn already dead |
 
 ## License

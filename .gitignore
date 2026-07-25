@@ -4,8 +4,10 @@ config/*.ovpn
 # local environment overrides
 .env
 
-# per-user VPN DNS suffixes (contain internal hostnames)
+# per-user VPN DNS suffixes / container access rules (contain internal
+# hostnames and network layout)
 config/vpn.dns
+config/vpn.access
 
 # vpnp runtime state (pidfile, daemon log)
 .run/
