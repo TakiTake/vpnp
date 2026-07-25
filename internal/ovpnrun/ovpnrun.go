@@ -31,6 +31,10 @@ type Profile struct {
 	Port      string
 	Proto     string
 	Sanitized string
+	// SAML is true when the profile carries AWS's `auth-federate`
+	// directive: the endpoint authenticates via SAML/SSO federation
+	// instead of a client certificate. See saml.go for the flow.
+	SAML bool
 }
 
 func RunDir(root string) string   { return filepath.Join(root, ".run") }
@@ -39,9 +43,24 @@ func LogPath(root string) string  { return filepath.Join(RunDir(root), "ovpn.log
 func PidPath(root string) string  { return filepath.Join(RunDir(root), "ovpn.pid") }
 
 // Binary returns the openvpn executable to use.
-func Binary() (string, error) {
+//
+// SAML profiles need openvpn-aws — stock openvpn caps a TLS control
+// message at 2 KB (TLS_CHANNEL_BUF_SIZE) and the AWS SAML flow sends the
+// multi-KB SAML response as the password inside one such message.
+// openvpn-aws is stock OpenVPN with those buffers raised (formula in
+// TakiTake/homebrew-tap).
+func Binary(saml bool) (string, error) {
 	if v := os.Getenv("VPNP_OPENVPN"); v != "" {
 		return v, nil
+	}
+	if saml {
+		if _, err := os.Stat("/opt/homebrew/bin/openvpn-aws"); err == nil {
+			return "/opt/homebrew/bin/openvpn-aws", nil
+		}
+		if p, err := exec.LookPath("openvpn-aws"); err == nil {
+			return p, nil
+		}
+		return "", errors.New("this profile uses SAML federation, which needs the patched openvpn — install it: brew install TakiTake/tap/openvpn-aws")
 	}
 	if _, err := os.Stat("/opt/homebrew/sbin/openvpn"); err == nil {
 		return "/opt/homebrew/sbin/openvpn", nil
@@ -85,6 +104,16 @@ func ParseProfile(path string) (*Profile, error) {
 		case len(fields) > 1 && fields[0] == "proto":
 			p.Proto = fields[1]
 			continue // re-passed via --remote; keeping both is harmless but redundant
+		case len(fields) > 0 && fields[0] == "auth-federate":
+			// AWS-only directive (SAML federation) — stock openvpn
+			// exits on it; vpnp drives the SAML flow itself.
+			p.SAML = true
+			continue
+		case len(fields) > 0 && (fields[0] == "auth-user-pass" || fields[0] == "auth-retry"):
+			// Credentials are passed via --auth-user-pass on the
+			// command line (SAML flow); auth-retry stays "none" so a
+			// consumed one-time SAML password can't retry-loop.
+			continue
 		}
 		body = append(body, line)
 	}
@@ -142,8 +171,12 @@ func lookupOne(name string) (string, error) {
 // install the pushed DNS server as the Mac's GLOBAL resolver (all lookups
 // through the VPN, broken DNS if openvpn dies uncleanly). vpnp applies
 // per-domain split-DNS via /etc/resolver instead — see internal/macdns.
-func Start(root string, p *Profile, ip string) error {
-	bin, err := Binary()
+//
+// authFile, when non-empty, is a two-line username/password file passed
+// via --auth-user-pass with --auth-retry none (the SAML flow's one-time
+// CRV1 password; see saml.go).
+func Start(root string, p *Profile, ip, authFile string) error {
+	bin, err := Binary(p.SAML)
 	if err != nil {
 		return err
 	}
@@ -162,7 +195,7 @@ func Start(root string, p *Profile, ip string) error {
 	if err := os.WriteFile(LogPath(root), nil, 0o644); err != nil {
 		return err
 	}
-	cmd := exec.Command("sudo", bin,
+	argv := []string{bin,
 		"--config", ConfPath(root),
 		"--remote", ip, p.Port, p.Proto,
 		"--daemon",
@@ -170,7 +203,11 @@ func Start(root string, p *Profile, ip string) error {
 		"--writepid", PidPath(root),
 		"--dns-updown", "disable",
 		"--verb", "3",
-		"--connect-timeout", "20")
+		"--connect-timeout", "20"}
+	if authFile != "" {
+		argv = append(argv, "--auth-user-pass", authFile, "--auth-retry", "none")
+	}
+	cmd := exec.Command("sudo", argv...)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("starting openvpn failed: %w", err)
