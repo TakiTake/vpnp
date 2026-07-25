@@ -147,20 +147,26 @@ Connect the VPN. Steps, in order:
   1. Parse the .ovpn profile (default config/vpn.ovpn), strip its
      remote/remote-random-hostname lines, resolve the endpoint once with a
      random-prefixed DNS label and pin that IP for the whole session.
-  2. Start openvpn as a root daemon (sudo) with log/pidfile under .run/.
-     openvpn owns reconnects from here; certificate auth means no prompts.
-  3. Wait up to 60s for the tunnel, then read the pushed routes and DNS
+  2. SAML profiles only (auth-federate): fetch the sign-in challenge, open
+     the browser for the IdP sign-in, catch the SAML response on
+     127.0.0.1:35001. Needs openvpn-aws: brew install TakiTake/tap/openvpn-aws
+  3. Start openvpn as a root daemon (sudo) with log/pidfile under .run/.
+     openvpn owns reconnects from here; certificate auth means no prompts,
+     SAML sessions reconnect silently until the AWS session duration
+     expires (then: vpnp up again).
+  4. Wait up to 60s for the tunnel, then read the pushed routes and DNS
      server from the log.
-  4. Write /etc/resolver/<suffix> for each suffix in config/vpn.dns
+  5. Write /etc/resolver/<suffix> for each suffix in config/vpn.dns
      (created from its .example on first run) and flush the DNS caches.
-  5. Load the container policy (source-NAT + default-deny allowlist from
+  6. Load the container policy (source-NAT + default-deny allowlist from
      config/vpn.access) into the pf anchor com.apple/vpnp.
 
 Flags:
   -ovpn <path>   profile to use (default config/vpn.ovpn); switching
                  endpoints = vpnp down && vpnp up -ovpn <other.ovpn>
 
-Requires sudo (interactive password prompt unless cached/NOPASSWD).
+Requires sudo (interactive password prompt unless cached/NOPASSWD); a SAML
+profile additionally requires an interactive browser sign-in.
 Exit: 0 connected and configured; 1 any step failed (partial state is
 possible — run 'vpnp down' to clean up, 'vpnp logs' to diagnose).
 Errors if already up ("openvpn already running").
@@ -279,8 +285,26 @@ func cmdUp(args []string) error {
 	}
 	step(fmt.Sprintf("endpoint %s → pinned %s (%s/%s)", prof.Host, ip, prof.Port, prof.Proto))
 
+	authFile := ""
+	if prof.SAML {
+		step("SAML federation profile — fetching the sign-in challenge")
+		sid, idpURL, err := ovpnrun.FetchSAMLChallenge(root, prof, ip)
+		if err != nil {
+			return err
+		}
+		fmt.Println("  opening your browser — sign in with your identity provider")
+		saml, err := ovpnrun.AwaitSAMLResponse(idpURL, 5*time.Minute)
+		if err != nil {
+			return err
+		}
+		if authFile, err = ovpnrun.WriteSAMLAuth(root, sid, saml); err != nil {
+			return err
+		}
+		step("signed in")
+	}
+
 	fmt.Println("  (openvpn needs root for the utun and routes — sudo may ask for your password)")
-	if err := ovpnrun.Start(root, prof, ip); err != nil {
+	if err := ovpnrun.Start(root, prof, ip, authFile); err != nil {
 		return err
 	}
 	if err := ovpnrun.WaitConnected(root, 60*time.Second); err != nil {
@@ -288,6 +312,9 @@ func cmdUp(args []string) error {
 			return fmt.Errorf("%w\n(openvpn is still running — clean up with: vpnp down)", err)
 		}
 		return err
+	}
+	if authFile != "" {
+		os.Remove(authFile) //nolint:errcheck // one-time password, already consumed
 	}
 	routes := ovpnrun.PushedRoutes(root)
 	step(fmt.Sprintf("VPN connected — split-tunnel, OS routes %s via the tunnel", strings.Join(routes, ", ")))
@@ -322,6 +349,7 @@ func cmdDown() error {
 	if err != nil {
 		return err
 	}
+	os.Remove(ovpnrun.SAMLAuthPath(root)) //nolint:errcheck // leftover from an aborted SAML sign-in, if any
 	pid, running := ovpnrun.Pid(root)
 	if !running && len(macdns.Applied(root)) == 0 && pfnat.Info(root) == "" {
 		fmt.Println("vpnp was not up.")
