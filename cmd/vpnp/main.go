@@ -36,6 +36,10 @@ import (
 // from the working directory.
 var repoRoot string
 
+// version is baked in at release-build time:
+// -ldflags "-X main.version=v1.2.3".
+var version = "dev"
+
 func main() {
 	if len(os.Args) < 2 {
 		usage()
@@ -63,6 +67,8 @@ func main() {
 		err = cmdAccess(args)
 	case "logs":
 		err = cmdLogs()
+	case "version", "-v", "--version":
+		fmt.Println(version)
 	case "help", "-h", "--help":
 		if len(args) > 0 {
 			if h, ok := commandHelp[args[0]]; ok {
@@ -102,6 +108,7 @@ COMMANDS
   access [-apply]    edit config/vpn.access ($EDITOR); -apply skips the editor
                      and just validates + re-applies the file
   logs               follow the openvpn log (blocks until interrupted)
+  version            print the vpnp version
   help [command]     this overview, or detailed per-command help
 
 HOW IT WORKS
