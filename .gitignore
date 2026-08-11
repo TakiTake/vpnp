@@ -17,6 +17,10 @@ config/vpn.access
 *.test
 *.out
 
-# local tooling state and obsolete build artifacts from earlier incarnations
-.claude/
+# agent worktrees (transient) and personal Claude Code settings.
+# .claude/skills/ IS tracked; everything else under .claude/ is not.
+.claude/*
+!.claude/skills/
+
+# obsolete build artifacts from earlier incarnations
 kernel/
