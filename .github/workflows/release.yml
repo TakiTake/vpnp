@@ -1,0 +1,84 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    # macos-latest runners are Apple silicon, so a plain native build already
+    # targets aarch64-apple-darwin — no cross-compilation needed. vpnp has no
+    # version file to cross-check: the tag itself is baked into the binary
+    # via -X main.version (see `make dist`), so the only tag↔repo contract
+    # is the CHANGELOG section, checked first below.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # The job never git-pushes; releases go through gh with GH_TOKEN.
+          persist-credentials: false
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      # Runs before the costly build/package steps so a missing CHANGELOG
+      # section fails the job fast instead of after a full release build.
+      - name: Extract release notes from CHANGELOG.md
+        run: |
+          set -eu
+          # scripts/release-notes.sh is the single implementation, so the
+          # preflight check in the /release skill runs exactly what this
+          # job runs.
+          VERSION="${GITHUB_REF_NAME#v}"
+          if ! NOTES="$(scripts/release-notes.sh "$VERSION")"; then
+            echo "::error::no CHANGELOG.md section found for version $VERSION" >&2
+            exit 1
+          fi
+          {
+            echo "NOTES<<RELEASE_NOTES_EOF"
+            echo "$NOTES"
+            echo "RELEASE_NOTES_EOF"
+          } >> "$GITHUB_ENV"
+
+      - name: Test
+        run: go test ./...
+
+      - name: Build release tarball
+        # make dist owns the packaging (build flags, staged layout, tarball
+        # name) so CI and a local `make dist` can never drift. VERSION is
+        # passed explicitly rather than trusting `git describe` on a
+        # shallow CI checkout.
+        run: make dist VERSION="$GITHUB_REF_NAME"
+
+      - name: Sanity-check binary version
+        run: |
+          set -eu
+          ACTUAL="$(./dist/stage/vpnp version)"
+          if [ "$ACTUAL" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::vpnp version printed '$ACTUAL', expected $GITHUB_REF_NAME" >&2
+            exit 1
+          fi
+
+      - name: Checksum
+        run: |
+          set -eu
+          ARCHIVE="vpnp-${GITHUB_REF_NAME}-aarch64-apple-darwin.tar.gz"
+          # Bare filename inside the .sha256 so `shasum -c` works from
+          # any directory holding both downloaded assets.
+          (cd dist && shasum -a 256 "$ARCHIVE" > "$ARCHIVE.sha256")
+          echo "ARCHIVE=dist/$ARCHIVE" >> "$GITHUB_ENV"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          gh release create "$GITHUB_REF_NAME" \
+            --title "vpnp $GITHUB_REF_NAME" \
+            --notes "$NOTES" \
+            "$ARCHIVE" \
+            "$ARCHIVE.sha256"
