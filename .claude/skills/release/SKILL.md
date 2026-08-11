@@ -50,7 +50,10 @@ section.
   runs it *after* the tag is already public, so catching a bad heading
   here avoids pushing a tag that's guaranteed to fail downstream (see
   "If the release workflow fails" below).
-- Then hand over the tag command:
+- Then hand over the tag command. The leading `!` is Claude Code's
+  run-in-this-session prompt prefix, not shell negation — these lines are
+  typed into the Claude Code prompt as-is; from a plain terminal, drop
+  the `!`:
   ```sh
   ! git checkout main && git pull
   ! git tag v$VERSION && git push origin v$VERSION
@@ -105,6 +108,9 @@ verified.
   `git -C "$(brew --repository takitake/tap)" pull`.
 
 ## 5. (user, optional) Smoke test
+
+Same `!` convention as step 2 — Claude Code prompt prefix, drop it in a
+plain terminal:
 
 ```sh
 ! brew upgrade TakiTake/tap/vpnp || brew install TakiTake/tap/vpnp
